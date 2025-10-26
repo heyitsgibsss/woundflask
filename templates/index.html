@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WoundAI Flask</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <!-- Loading Overlay -->
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner"></div>
+    <div class="loading-text">Analyzing image</div>
+  </div>
+
+  <!-- Camera Modal -->
+  <div class="camera-modal" id="cameraModal">
+    <div class="camera-container">
+      <video id="cameraVideo" autoplay playsinline></video>
+      <canvas id="cameraCanvas"></canvas>
+      <div class="camera-controls">
+        <button class="camera-btn" id="captureBtn">📸 Capture Photo</button>
+        <button class="camera-btn secondary" id="closeCameraBtn">❌ Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="header">
+    <div class="header-text">
+      <h2>WOUNDAI FLASK</h2>
+      <p class="subtitle">
+        Aplikasi flask untuk mendeteksi dan mengklasifikasi jenis luka dan penanganan berbasis LLM.
+        <br>
+        Berdasarkan 10 kelas: Abrasions, Bruises, Burns, Cut, Diabetic Wounds, Laseration, Normal, Pressure Wounds, Surgical Wounds, Venous Wounds.
+      </p>
+    </div>
+    <img src="/static/wound.png" alt="WoundAI Logo" class="logo" onerror="this.style.display='none'">
+  </div>
+
+  <div class="main-grid">
+
+    <div class="left-column">
+
+      <div class="card" id="upload-box">
+        <form method="POST" enctype="multipart/form-data" id="uploadForm" class="upload-controls">
+          
+          <div class="input-row">
+            <label for="imageInput" class="file-label">📁 Choose File</label>
+            <input type="file" name="image" id="imageInput" accept=".png,.jpg,.jpeg,.webp" required>
+            
+            <button type="button" class="icon-btn" id="cameraBtn">📷 Camera</button>
+          </div>
+
+          <div class="btn-group">
+            <button class="btn" type="submit" id="analyzeBtn">Analyze</button>
+            <a href="/" class="btn btn-new">New</a>
+          </div>
+          
+          <div class="file-info-row">
+            <div class="inline-spinner" id="inlineSpinner"></div>
+            <span id="fileNameDisplay">No file selected</span>
+            <span id="clearFile">❌</span>
+          </div>
+        </form>
+
+        <div id="imagePreview" class="preview-box">
+          <span id="previewPlaceholder">PREVIEW IMAGE</span>
+          <img id="previewImg" alt="Image preview">
+        </div>
+      </div>
+
+      <div class="card" id="result-box">
+        {% if result %}
+          {% if result.status == "error" %}
+            <div class="err">Model Load Error</div>
+            <pre>{{ result.message }}</pre>
+            <p class="muted">Re-export your Keras model with input=(224,224,3).</p>
+
+          {% elif result.status == "not_wound" %}
+            <div class="err">Bukan Gambar Luka</div>
+            <p class="muted">Gemini triage indicates the uploaded image is not a wound/ulcer.</p>
+            {% if result.input_image %}
+              <div class="viz-container">
+                <div class="viz-box">
+                  <img src="{{ '/' + result.input_image }}" alt="uploaded">
+                </div>
+              </div>
+            {% endif %}
+          
+          {% elif result.status == "ok" %}
+            <div class="ok">Prediction completed</div>
+            <p>
+              <span class="label">Predicted Class:</span>
+              <span class="pill">{{ result.pred_label }}</span>
+            </p>
+            <p>
+              <span class="label">Confidence Score:</span> {{ result.confidence_pct }}%
+            </p>
+            <div class="confidence-bar">
+              <div class="confidence-fill" style="width: {{ result.confidence_pct }}%;"></div>
+            </div>
+            
+            <div class="viz-container">
+              <div class="viz-box" id="gradcam-box">
+                <img src="{{ '/' + result.heatmap_image }}" alt="heatmap">
+              </div>
+              <div class="viz-box" id="overlay-box">
+                <img src="{{ '/' + result.overlay_image }}" alt="overlay">
+              </div>
+            </div>
+
+          {% endif %}
+        {% else %}
+          <p style="color: #888; font-style: italic;">Upload an image and click "Analyze" to see results here...</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="right-column">
+      
+      <div class="card" id="gemini-box">
+        <h3>Gemini LLM Analysis</h3>
+        
+        {% if result and result.status == "ok" %}
+          <div class="gemini-content">
+            {{ result.gemini_html | safe }}
+          </div>
+        {% else %}
+          <div class="gemini-content" style="display:flex; align-items:center; justify-content:center; color:#888;">
+            <p style="text-align:center; font-style:italic;">Hasil analisis dan penanganan dari Gemini LLM akan muncul di sini...</p>
+          </div>
+        {% endif %}
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footer">
+    Model path: <code>{{ config.MODEL_PATH if config else 'model/model.efficientnetb1.keras' }}</code>
+  </div>
+
+  <script>
+    // --- JavaScript for UI interactivity ---
+    
+    const imageInput = document.getElementById('imageInput');
+    const cameraBtn = document.getElementById('cameraBtn');
+    const imagePreview = document.getElementById('imagePreview');
+    const previewImg = document.getElementById('previewImg');
+    const previewPlaceholder = document.getElementById('previewPlaceholder');
+    const fileNameDisplay = document.getElementById('fileNameDisplay');
+    const clearFile = document.getElementById('clearFile');
+    const inlineSpinner = document.getElementById('inlineSpinner');
+
+    // Camera modal elements
+    const cameraModal = document.getElementById('cameraModal');
+    const cameraVideo = document.getElementById('cameraVideo');
+    const cameraCanvas = document.getElementById('cameraCanvas');
+    const captureBtn = document.getElementById('captureBtn');
+    const closeCameraBtn = document.getElementById('closeCameraBtn');
+    let cameraStream = null;
+
+    // 1. Handle image preview and file name display
+    function handleFileSelect(file) {
+      if (file) {
+        const reader = new FileReader();
+        
+        reader.onload = function(event) {
+          previewImg.src = event.target.result;
+          previewImg.style.display = 'block';
+          previewPlaceholder.style.display = 'none';
+        };
+        
+        reader.readAsDataURL(file);
+        
+        // Update file name display
+        fileNameDisplay.textContent = file.name;
+        fileNameDisplay.style.display = 'inline'; // Show file name
+        clearFile.style.display = 'inline'; // Show clear button
+      } else {
+        resetPreview();
+      }
+    }
+
+    imageInput.addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      handleFileSelect(file);
+    });
+
+    // 2. Camera button functionality - Open real camera
+    cameraBtn.addEventListener('click', async function() {
+      try {
+        cameraModal.classList.add('active');
+        cameraStream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: 'environment', // Use rear camera on mobile
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          } 
+        });
+        cameraVideo.srcObject = cameraStream;
+      } catch (err) {
+        alert('Unable to access camera: ' + err.message);
+        cameraModal.classList.remove('active');
+      }
+    });
+
+    // 3. Capture photo from camera
+    captureBtn.addEventListener('click', function() {
+      // Set canvas size to match video
+      cameraCanvas.width = cameraVideo.videoWidth;
+      cameraCanvas.height = cameraVideo.videoHeight;
+      
+      // Draw current video frame to canvas
+      const ctx = cameraCanvas.getContext('2d');
+      ctx.drawImage(cameraVideo, 0, 0);
+      
+      // Convert canvas to blob and create file
+      cameraCanvas.toBlob(function(blob) {
+        const file = new File([blob], `camera_${Date.now()}.jpg`, { type: 'image/jpeg' });
+        
+        // Transfer to main input
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+        imageInput.files = dataTransfer.files;
+        
+        // Show preview
+        handleFileSelect(file);
+        
+        // Close camera
+        stopCamera();
+      }, 'image/jpeg', 0.95);
+    });
+
+    // 4. Close camera modal
+    closeCameraBtn.addEventListener('click', function() {
+      stopCamera();
+    });
+
+    // Stop camera stream
+    function stopCamera() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+      }
+      cameraModal.classList.remove('active');
+    }
+
+    // 5. Handle the 'clear file' (X) button
+    clearFile.addEventListener('click', function() {
+      imageInput.value = null;
+      resetPreview();
+    });
+
+    // 6. Reset helper function
+    function resetPreview() {
+      previewImg.src = '';
+      previewImg.style.display = 'none';
+      previewPlaceholder.style.display = 'block';
+      fileNameDisplay.textContent = 'No file selected';
+      fileNameDisplay.style.display = 'none'; // Hide file name
+      clearFile.style.display = 'none'; // Hide clear button
+      inlineSpinner.classList.remove('active'); // Hide spinner
+    }
+
+    // 7. Show inline loading spinner when form is submitted
+    const uploadForm = document.getElementById('uploadForm');
+    const loadingOverlay = document.getElementById('loadingOverlay');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+
+    uploadForm.addEventListener('submit', function(e) {
+      // Show inline spinner next to file name
+      inlineSpinner.classList.add('active');
+      analyzeBtn.disabled = true;
+      
+      // Keep full screen overlay too for better UX
+      loadingOverlay.classList.add('active');
+    });
+
+    // 8. Hide loading overlay if user comes back (e.g., form error)
+    window.addEventListener('pageshow', function(event) {
+      if (event.persisted || performance.getEntriesByType("navigation")[0].type === "back_forward") {
+        loadingOverlay.classList.remove('active');
+        inlineSpinner.classList.remove('active');
+        analyzeBtn.disabled = false;
+      }
+    });
+
+    // 9. Keep preview image after page reload (if result exists)
+    {% if result and result.input_image %}
+    window.addEventListener('DOMContentLoaded', function() {
+      // If we have a result, show the uploaded image in preview
+      const uploadedImage = "{{ '/' + result.input_image }}";
+      previewImg.src = uploadedImage;
+      previewImg.style.display = 'block';
+      previewPlaceholder.style.display = 'none';
+      fileNameDisplay.textContent = 'Analyzed image';
+      fileNameDisplay.style.display = 'inline';
+      clearFile.style.display = 'inline';
+    });
+    {% endif %}
+  </script>
+</body>
+</html>
