@@ -31,5 +31,9 @@ ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyA41s8Xu9VXiCpZhIWiRDOvUMWYXu9TqxE")
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash")
 
+# Control whether the model should be preloaded at app startup. Default to False
+# so that lightweight LLM triage can run before loading the heavy model.
+PRELOAD_MODEL = os.getenv("PRELOAD_MODEL", "false").lower() in ("1", "true", "yes")
+
 # Enforce TensorFlow version per your spec
 REQUIRED_TF = "2.19.0"

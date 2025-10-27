@@ -252,9 +252,24 @@ def gemini_check_is_wound(image_path: str):
     try:
         resp = model.generate_content([prompt, genai.upload_file(image_path)])
         txt = (resp.text or "").strip().upper()
-        if "NOT_WOUND" in txt and "WOUND" not in txt:
+        # Normalize and check whole-word patterns. Model replies sometimes include
+        # variants like 'NOT WOUND', 'NOT_WOUND', or 'NOT-WOUND', and naive
+        # substring checks (e.g. 'NOT_WOUND' contains 'WOUND') cause logic errors.
+        import re
+        # Check negative first: variants of NOT WOUND
+        if re.search(r"\bNOT[_\-\s]?WOUND\b", txt):
+            print(f"[gemini_check_is_wound] Gemini response (interpreted as NOT_WOUND): {txt}")
             return False, "that is not a wound image"
-        return True, "wound image detected"
+        # Then check positive 'WOUND' (but won't match 'NOT_WOUND' now)
+        if re.search(r"\bWOUND\b", txt):
+            print(f"[gemini_check_is_wound] Gemini response (interpreted as WOUND): {txt}")
+            return True, "wound image detected"
+
+        # If the model reply is ambiguous or doesn't contain the expected tokens,
+        # fall back to permissive behavior (allow processing) but include the
+        # raw Gemini text in the message for debugging.
+        print(f"[gemini_check_is_wound] Gemini response ambiguous: {txt}")
+        return True, f"Gemini unclear ('{txt}'); proceeding as wound."
     except Exception as e:
         return True, f"Gemini check failed ({e}); proceeding as wound."
 
@@ -308,16 +323,17 @@ def handle_upload_and_process(file_storage) -> dict:
     file_storage.save(saved_path)
     saved_path = saved_path.replace("\\", "/")
 
+    # LLM triage BEFORE loading the heavy model (fast-fail for non-wound images)
+    is_wound, msg = gemini_check_is_wound(saved_path)
+    if not is_wound:
+        # Return quickly; no model load required
+        return {"status": "not_wound", "message": msg, "input_image": saved_path}
+
     # Load model (will raise if the saved file is malformed)
     try:
         model = get_model()
     except RuntimeError as e:
         return {"status": "error", "message": str(e)}
-
-    # LLM triage
-    is_wound, msg = gemini_check_is_wound(saved_path)
-    if not is_wound:
-        return {"status": "not_wound", "message": msg, "input_image": saved_path}
 
     # Preprocess & predict
     xbatch, original_resized = load_image_for_model(saved_path)

@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <title>WoundAI Flask</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="{{ url_for('static', filename='wound.png') }}" type="image/x-icon">
+  <link rel="shortcut icon" href="{{ url_for('static', filename='wound.png') }}" type="image/x-icon">
+  <link rel="icon" href="{{ url_for('static', filename='wound.png') }}" type="image/png" sizes="32x32">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -21,6 +24,7 @@
       <canvas id="cameraCanvas"></canvas>
       <div class="camera-controls">
         <button class="camera-btn" id="captureBtn">📸 Capture Photo</button>
+        <button class="camera-btn" id="switchCameraBtn">🔁 Switch</button>
         <button class="camera-btn secondary" id="closeCameraBtn">❌ Close</button>
       </div>
     </div>
@@ -152,13 +156,15 @@
     const clearFile = document.getElementById('clearFile');
     const inlineSpinner = document.getElementById('inlineSpinner');
 
-    // Camera modal elements
-    const cameraModal = document.getElementById('cameraModal');
-    const cameraVideo = document.getElementById('cameraVideo');
-    const cameraCanvas = document.getElementById('cameraCanvas');
-    const captureBtn = document.getElementById('captureBtn');
-    const closeCameraBtn = document.getElementById('closeCameraBtn');
-    let cameraStream = null;
+  // Camera modal elements
+  const cameraModal = document.getElementById('cameraModal');
+  const cameraVideo = document.getElementById('cameraVideo');
+  const cameraCanvas = document.getElementById('cameraCanvas');
+  const captureBtn = document.getElementById('captureBtn');
+  const closeCameraBtn = document.getElementById('closeCameraBtn');
+  const switchCameraBtn = document.getElementById('switchCameraBtn');
+  let cameraStream = null;
+  let currentFacingMode = 'environment'; // default to rear on mobile
 
     // 1. Handle image preview and file name display
     function handleFileSelect(file) {
@@ -185,27 +191,66 @@
     imageInput.addEventListener('change', function(e) {
       const file = e.target.files[0];
       handleFileSelect(file);
+      if (file) runTriage(file);
     });
 
     // 2. Camera button functionality - Open real camera
     cameraBtn.addEventListener('click', async function() {
       try {
         cameraModal.classList.add('active');
-        cameraStream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            facingMode: 'environment', // Use rear camera on mobile
-            width: { ideal: 1920 },
-            height: { ideal: 1080 }
-          } 
-        });
-        cameraVideo.srcObject = cameraStream;
+        await startCamera(currentFacingMode);
       } catch (err) {
         alert('Unable to access camera: ' + err.message);
         cameraModal.classList.remove('active');
       }
     });
 
-    // 3. Capture photo from camera
+    // Switch camera (front/back) on mobile devices
+    switchCameraBtn.addEventListener('click', async function() {
+      // Toggle facing mode
+      currentFacingMode = (currentFacingMode === 'environment') ? 'user' : 'environment';
+      try {
+        await startCamera(currentFacingMode);
+      } catch (err) {
+        console.warn('Switch camera failed:', err);
+      }
+    });
+
+    async function startCamera(facingMode) {
+      // Stop any existing stream first
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+      }
+
+      // Try to get camera with facingMode constraint
+      const constraints = {
+        video: {
+          facingMode: { exact: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      };
+
+      try {
+        cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        // Some browsers/devices don't support exact facingMode; try a looser constraint
+        try {
+          cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode }, audio: false });
+        } catch (err2) {
+          // Fallback to default camera
+          cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+      }
+
+      cameraVideo.srcObject = cameraStream;
+      // Some browsers require play() call after srcObject set
+      try { await cameraVideo.play(); } catch(e) { /* ignore */ }
+    }
+
+  // 3. Capture photo from camera
     captureBtn.addEventListener('click', function() {
       // Set canvas size to match video
       cameraCanvas.width = cameraVideo.videoWidth;
@@ -226,8 +271,9 @@
         
         // Show preview
         handleFileSelect(file);
-        
-        // Close camera
+        // Run triage on captured image
+        runTriage(file);
+        // Close camera modal after capture
         stopCamera();
       }, 'image/jpeg', 0.95);
     });
@@ -268,14 +314,64 @@
     const loadingOverlay = document.getElementById('loadingOverlay');
     const analyzeBtn = document.getElementById('analyzeBtn');
 
-    uploadForm.addEventListener('submit', function(e) {
+    uploadForm.addEventListener('submit', async function(e) {
       // Show inline spinner next to file name
       inlineSpinner.classList.add('active');
       analyzeBtn.disabled = true;
-      
       // Keep full screen overlay too for better UX
       loadingOverlay.classList.add('active');
+
+      const file = imageInput.files[0];
+      if (!file) return; // let server validate
+
+      // If triage hasn't run yet, run it now synchronously before submitting
+      if (uploadForm.dataset.triage !== 'true') {
+        await runTriage(file);
+      }
+
+      // If triage failed (NOT_WOUND), cancel submit and show message
+      if (uploadForm.dataset.triage === 'false') {
+        e.preventDefault();
+        loadingOverlay.classList.remove('active');
+        inlineSpinner.classList.remove('active');
+        analyzeBtn.disabled = false;
+        alert('Gemini triage: ' + (uploadForm.dataset.triage_msg || 'Image is not a wound'));
+        return;
+      }
+      // else allow the submit to continue
     });
+
+    async function runTriage(file) {
+      // Run fast LLM triage via AJAX; set uploadForm.dataset.triage = 'true'|'false'
+      inlineSpinner.classList.add('active');
+      try {
+        const fd = new FormData();
+        fd.append('image', file, file.name);
+        const resp = await fetch('/triage', { method: 'POST', body: fd });
+        if (!resp.ok) {
+          console.warn('Triage request failed', resp.status);
+          uploadForm.dataset.triage = 'true';
+          return;
+        }
+        const j = await resp.json();
+        uploadForm.dataset.triage = j.is_wound ? 'true' : 'false';
+        uploadForm.dataset.triage_msg = j.message || '';
+        if (!j.is_wound) {
+          // Show a quick user-facing message and keep preview
+          alert('Not a wound image: ' + (j.message || 'Rejected by LLM'));
+          analyzeBtn.disabled = true;
+        } else {
+          analyzeBtn.disabled = false;
+        }
+      } catch (err) {
+        console.error('Triage error', err);
+        // On error, be permissive and allow processing to continue server-side
+        uploadForm.dataset.triage = 'true';
+        analyzeBtn.disabled = false;
+      } finally {
+        inlineSpinner.classList.remove('active');
+      }
+    }
 
     // 8. Hide loading overlay if user comes back (e.g., form error)
     window.addEventListener('pageshow', function(event) {
