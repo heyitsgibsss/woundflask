@@ -9,6 +9,7 @@ venv/
 env/
 ENV/
 venv.bak/
+venv11/
 
 # Distribution / packaging
 build/

@@ -1,0 +1,8 @@
+flask
+tensorflow==2.19.0
+# TensorFlow 2.19 requires numpy>=1.26; pin to a compatible release
+numpy==1.26.0
+Pillow>=9.4.0,<10
+opencv-python-headless>=4.7.0,<5
+matplotlib>=3.7.0,<4
+google-generativeai>=0.6.0,<1
